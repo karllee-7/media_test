@@ -192,7 +192,7 @@ void mediaPlayer::run(){
             av_packet_unref(frame_pkt);
         }else if(frame_pkt->stream_index == audioindex){
             qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
-#if 1
+#if 0
             avcodec_send_packet(audio_pcodec_ctx, frame_pkt);
             while(avcodec_receive_frame(audio_pcodec_ctx, pframePCM) == 0){
                 QImage img_rgb(dst_width, dst_height, QImage::Format_RGB16);
@@ -251,13 +251,17 @@ void mediaPlayer::run(){
     av_packet_free(&frame_pkt);
     /*=======================================================================*/
     status.started = false;
+    if(audio_pcodec_ctx != nullptr){
+        avcodec_close(audio_pcodec_ctx);
+        avcodec_free_context(&audio_pcodec_ctx);
+    }
     if(video_pcodec_ctx != nullptr){
         avcodec_close(video_pcodec_ctx);
         avcodec_free_context(&video_pcodec_ctx);
     }
     if(pFormatCtx != nullptr){
         avformat_close_input(&pFormatCtx);
-        avcodec_free_context(&video_pcodec_ctx);
+        //avcodec_free_context(&video_pcodec_ctx);
     }
     emit videoExit(0);
 }
