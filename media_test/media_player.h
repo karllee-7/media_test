@@ -9,29 +9,15 @@
 #include <string>
 #include <QQuickImageProvider>
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/pixfmt.h>
-#include <libavutil/imgutils.h>
-#include <libavdevice/avdevice.h>
-#include <libswscale/swscale.h>
-#ifdef __cplusplus
-};
-#endif
+#include "fplayer.h"
 
 using std::endl;
 using std::string;
 /*===================================================================================*/
-class mediaPlayer : public QThread{
+class mediaPlayer : public QObject{
     Q_OBJECT
-    Q_PROPERTY(QString file_name READ rd_file_name WRITE wt_file_name)
-    Q_PROPERTY(int dst_width READ rd_dst_width WRITE wt_dst_width)
-    Q_PROPERTY(int dst_height READ rd_dst_height WRITE wt_dst_height)
     Q_ENUMS(CMD_KEY)
+    fplayer *player;
 public:
     enum CMD_KEY{
         V_START,
@@ -41,14 +27,7 @@ public:
     };
     mediaPlayer(QObject *parent = nullptr);
     ~mediaPlayer();
-    QString rd_file_name() const;
-    void wt_file_name(const QString a);
-    int rd_dst_width() const;
-    void wt_dst_width(const int a);
-    int rd_dst_height() const;
-    void wt_dst_height(const int a);
-    Q_INVOKABLE int open();
-    Q_INVOKABLE int open(const QString a);
+    Q_INVOKABLE int open(const QString a, int width, int height);
     Q_INVOKABLE int command(CMD_KEY key);
 signals:
     void refreshScrean(QImage img);
@@ -70,23 +49,6 @@ private:
     double time_start_s;
     int dst_width;
     int dst_height;
-};
-/*===================================================================================*/
-class vError : public std::exception
-{
-private:
-        int err_;
-        const char * errStr_;
-public:
-        vError(int err, const char * errStr) : err_(err), errStr_(errStr){}
-
-        ~vError() throw() {}
-
-        const char * what() const throw (){
-                return errStr_;
-        }
-
-        int err(void) const { return err_; }
 };
 /*===================================================================================*/
 

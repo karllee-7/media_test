@@ -11,9 +11,6 @@ Window {
 
     MediaPlayer {
         id: mply
-        dst_width: 640
-        dst_height: 480
-        // file_name: "H249_21.mp4"
     }
 
     Button {
@@ -51,7 +48,7 @@ Window {
         }
     }
     Component.onCompleted: {
-        mply.open("/home/karllee/temp/video_test.mp4")
+        mply.open("/home/karllee/temp/video_test.mp4", 800, 480)
         //video_show.source = 'http://img.pconline.com.cn/images/bbs4/200910/29/1256757186135.jpg'
     }
     Connections {

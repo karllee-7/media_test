@@ -16,34 +16,66 @@ extern "C"
 #endif
 
 #include <thread>
+#include <atomic>
+#include <iostream>
 
-using std::thread;
+//using std::thread;
+using std::atomic;
+using std::cout;
+using std::endl;
+
+/*===================================================================================*/
+class vError : public std::exception
+{
+private:
+        int err_;
+        const char * errStr_;
+public:
+        vError(int err, const char * errStr) : err_(err), errStr_(errStr){}
+
+        ~vError() throw() {}
+
+        const char * what() const throw (){
+                return errStr_;
+        }
+
+        int err(void) const { return err_; }
+};
+/*===================================================================================*/
 
 class fplayer{
 	int dst_width;
 	int dst_height;
 	AVFormatContext *pFormatCtx;
-	void (*videoCallBack)(const uint8_t *ptr);
-	void (*audioCallBack)(const uint8_t *ptr);
+	void (*fnc_videoCallBack)(const uint8_t *ptr);
+	void (*fnc_audioCallBack)(const uint8_t *ptr);
 	int videoindex;
 	int audioindex;
 	AVCodecContext *video_pcodec_ctx;
 	AVCodecContext *audio_pcodec_ctx;
-	thread th_video;
-	thread th_audio;
+	std::thread th_video;
+	std::thread th_audio;
+	atomic<bool> video_keep_run;
+	atomic<bool> audio_keep_run;
 public:
 	fplayer(){
 		pFormatCtx = NULL;
-		videoCallBack = NULL;
-		audioCallBack = NULL;
-		videoindex = 0;
-		audioindex = 0;
+		fnc_videoCallBack = NULL;
+		fnc_audioCallBack = NULL;
+		videoindex = -1;
+		audioindex = -1;
 		video_pcodec_ctx = NULL;
 		audio_pcodec_ctx = NULL;
-		th_video = NULL;
-		th_audio = NULL;
+		//th_video = NULL;
+		//th_audio = NULL;
 	}
 	~fplayer(){
+		video_keep_run = false;
+		audio_keep_run = false;
+		if(th_video.joinable())
+			th_video.join();
+		if(th_audio.joinable())
+			th_audio.join();
 		if(video_pcodec_ctx != nullptr){
 			avcodec_close(video_pcodec_ctx);
 			avcodec_free_context(&video_pcodec_ctx);
@@ -56,11 +88,11 @@ public:
 			avformat_close_input(&pFormatCtx);
 			avcodec_free_context(&video_pcodec_ctx);
 		}
-		// status.started = false;
 	}
-	int open(const char* name, int out_width, int out_height, void (*videoCallBack)(void *ptr), 
-			void (*audioCallBack)(void* ptr)){
+	int open(const char* name, int out_width, int out_height, void (*videoCallBack)(const uint8_t *ptr),
+					void (*audioCallBack)(const uint8_t *ptr)){
 		int ret;
+		char errbuf[1024];
 		av_register_all();
 		try{
 			pFormatCtx = avformat_alloc_context();
@@ -114,6 +146,8 @@ public:
 			}
 			dst_width = out_width;
 			dst_height = out_height;
+			fnc_videoCallBack = videoCallBack;
+			fnc_audioCallBack = audioCallBack;
 		}
 		catch(vError err){
 			qCritical("media player error: %s | code %d\n", err.what(), err.err());
@@ -129,118 +163,78 @@ public:
 				avformat_close_input(&pFormatCtx);
 				avcodec_free_context(&video_pcodec_ctx);
 			}
-			//status.started = false;
-			return;
+			return -1;
 		}
+		return 0;
 	}
 	int run(){
-		th_video = thread([&video_pcodec_ctx, dst_width, dst_height](){
+		video_keep_run = true;
+		audio_keep_run = true;
+		th_video = std::thread([this](){
 			AVPacket *frame_pkt = av_packet_alloc();
 			AVFrame *pframeYUV = av_frame_alloc();
 			AVFrame *pframeRGB = av_frame_alloc();
 			SwsContext *pImgCvtCtx = sws_getContext(
-				video_pcodec_ctx->width,
-				video_pcodec_ctx->height,
-				video_pcodec_ctx->pix_fmt,
-				dst_width,
-				dst_height,
-				AV_PIX_FMT_RGB565LE,
-				SWS_BICUBIC, NULL, NULL, NULL);
-			while(av_read_frame(pFormatCtx, frame_pkt) >= 0){
+					this->video_pcodec_ctx->width,
+					this->video_pcodec_ctx->height,
+					this->video_pcodec_ctx->pix_fmt,
+					this->dst_width,
+					this->dst_height,
+					AV_PIX_FMT_RGB565LE,
+					SWS_BICUBIC, NULL, NULL, NULL);
+			while(av_read_frame(this->pFormatCtx, frame_pkt) >= 0 && this->video_keep_run){
 				if(frame_pkt->stream_index == videoindex){
-					cout << "get video frame pts " << frame_pkt->pts*av_q2d(pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
+					cout << "get video frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
 					// qDebug() << "video_pstream->time_base " << video_pstream->time_base
-					avcodec_send_packet(video_pcodec_ctx, frame_pkt);
-					while(avcodec_receive_frame(video_pcodec_ctx, pframeYUV) == 0){
-						const uint8_t *img_rgb = malloc(sizeof(uint16_t)*dst_width*dst_height);
-						av_image_fill_arrays(pframeRGB->data, pframeRGB->linesize, img_rgb,
-							AV_PIX_FMT_RGB565BE, dst_width, dst_height, 1);
+					avcodec_send_packet(this->video_pcodec_ctx, frame_pkt);
+					while(avcodec_receive_frame(this->video_pcodec_ctx, pframeYUV) == 0){
+						auto img_rgb = (uint8_t *)malloc(sizeof(uint16_t)*this->dst_width*this->dst_height);
+						av_image_fill_arrays(pframeRGB->data, pframeRGB->linesize, (const uint8_t *)img_rgb,
+								AV_PIX_FMT_RGB565BE, this->dst_width, this->dst_height, 1);
 						sws_scale(pImgCvtCtx, pframeYUV->data, pframeYUV->linesize, 0, pframeYUV->height,
-						pframeRGB->data, pframeRGB->linesize);
-						//double tp = frame_pkt->pts*av_q2d(pFormatCtx->streams[videoindex]->time_base);
+								pframeRGB->data, pframeRGB->linesize);
+						//double tp = frame_pkt->pts*av_q2d(this->pFormatCtx->streams[videoindex]->time_base);
 						//usleep(60e3);
-						if(videoCallBack)
-							videoCallBack(img_rgb);
+						if(fnc_videoCallBack)
+							fnc_videoCallBack(img_rgb);
 						else
-							free(img_rgb);
+							free((void *)img_rgb);
 						av_frame_unref(pframeYUV);
 					}
 					av_packet_unref(frame_pkt);
-				}else if(frame_pkt->stream_index == audioindex){
-					qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
-					avcodec_send_packet(audio_pcodec_ctx, frame_pkt);
-					while(avcodec_receive_frame(audio_pcodec_ctx, pframePCM) == 0){
-						if(audioCallBack)
-							;//audioCallBack(NULL);
-						else
-							;
-						av_frame_unref(pframePCM);
-					}
-				}else{
-					//qDebug("drop channel %d frame.", frame_pkt->stream_index);
 				}
 			}
 			sws_freeContext(pImgCvtCtx);
-			av_frame_free(&pframePCM);
 			av_frame_free(&pframeYUV);
 			av_frame_free(&pframeRGB);
 			av_packet_free(&frame_pkt);
 		});
-		th_audio = thread([](){
+		th_audio = std::thread([this](){
 			AVPacket *frame_pkt = av_packet_alloc();
-			AVFrame *pframeYUV = av_frame_alloc();
-			AVFrame *pframeRGB = av_frame_alloc();
 			AVFrame *pframePCM = av_frame_alloc();
-			SwsContext *pImgCvtCtx = sws_getContext(
-				video_pcodec_ctx->width,
-				video_pcodec_ctx->height,
-				video_pcodec_ctx->pix_fmt,
-				dst_width,
-				dst_height,
-				AV_PIX_FMT_RGB565LE,
-				SWS_BICUBIC, NULL, NULL, NULL);
-			//status.running = true;
-			time_start_s = get_curr_time_s();
-			while(av_read_frame(pFormatCtx, frame_pkt) >= 0){
-				if(frame_pkt->stream_index == videoindex){
-					qDebug() << "get video frame pts " << frame_pkt->pts*av_q2d(pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
-					// qDebug() << "video_pstream->time_base " << video_pstream->time_base
-					avcodec_send_packet(video_pcodec_ctx, frame_pkt);
-					while(avcodec_receive_frame(video_pcodec_ctx, pframeYUV) == 0){
-						const uint8_t *img_rgb = malloc(sizeof(uint16_t)*dst_width*dst_height);
-						av_image_fill_arrays(pframeRGB->data, pframeRGB->linesize, img_rgb,
-							AV_PIX_FMT_RGB565BE, dst_width, dst_height, 1);
-						sws_scale(pImgCvtCtx, pframeYUV->data, pframeYUV->linesize, 0, pframeYUV->height,
-						pframeRGB->data, pframeRGB->linesize);
-						//double tp = frame_pkt->pts*av_q2d(pFormatCtx->streams[videoindex]->time_base);
-						//usleep(60e3);
-						if(videoCallBack)
-							videoCallBack(img_rgb);
+			int frame_size = av_get_bytes_per_sample(this->audio_pcodec_ctx->sample_fmt);
+			int channel_num = this->audio_pcodec_ctx->channels;
+			while(av_read_frame(this->pFormatCtx, frame_pkt) >= 0 && this->audio_keep_run){
+				if(frame_pkt->stream_index == audioindex){
+					qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
+					avcodec_send_packet(this->audio_pcodec_ctx, frame_pkt);
+					while(avcodec_receive_frame(this->audio_pcodec_ctx, pframePCM) == 0){
+						auto audio_pcm = (uint8_t*)malloc(frame_size*pframePCM->nb_samples*channel_num);
+						for(int i=0; i<pframePCM->nb_samples; i++)
+							for(int k=0; k<channel_num; k++)
+								memcpy(audio_pcm, pframePCM->data[k]+frame_size*i, frame_size);
+						if(fnc_audioCallBack)
+							fnc_audioCallBack(audio_pcm);
 						else
-							free(img_rgb);
-						av_frame_unref(pframeYUV);
-					}
-					av_packet_unref(frame_pkt);
-				}else if(frame_pkt->stream_index == audioindex){
-					qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
-					avcodec_send_packet(audio_pcodec_ctx, frame_pkt);
-					while(avcodec_receive_frame(audio_pcodec_ctx, pframePCM) == 0){
-						if(audioCallBack)
-							;//audioCallBack(NULL);
-						else
-							;
+							free((void *)audio_pcm);
 						av_frame_unref(pframePCM);
 					}
-				}else{
-					//qDebug("drop channel %d frame.", frame_pkt->stream_index);
 				}
 			}
-			sws_freeContext(pImgCvtCtx);
 			av_frame_free(&pframePCM);
-			av_frame_free(&pframeYUV);
-			av_frame_free(&pframeRGB);
 			av_packet_free(&frame_pkt);
 		});
+		return 0;
 	}
 };
 
