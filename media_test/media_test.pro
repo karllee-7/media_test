@@ -45,4 +45,5 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 HEADERS += \
     media_player.h \
     ximageprovider.h \
-    alsa_intf.h
+    alsa_intf.h \
+    fplayer.h
