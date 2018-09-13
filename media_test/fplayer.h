@@ -11,13 +11,15 @@ extern "C"
 #include <libavutil/imgutils.h>
 #include <libavdevice/avdevice.h>
 #include <libswscale/swscale.h>
-#include <unistd.h>
+//#include <libswresample/swresample.h>
 #ifdef __cplusplus
 };
 #endif
 
+#include <unistd.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <iostream>
 #include <functional>
 #include <QDebug>
@@ -25,6 +27,8 @@ extern "C"
 namespace karl{
 using std::thread;
 using std::atomic;
+using std::mutex;
+using std::unique_lock;
 using std::cout;
 using std::endl;
 /*===================================================================================*/
@@ -44,9 +48,10 @@ public:
 
         int err(void) const { return err_; }
 };
-typedef std::function<void(uint8_t* data)> fplayerCallBack;
+typedef std::function<void(uint8_t*, int, int)> fplayerCallBack;
 /*===================================================================================*/
 class fplayer{
+    mutex frame_lock;
 	int dst_width;
 	int dst_height;
 	AVFormatContext *pFormatCtx;
@@ -60,6 +65,7 @@ class fplayer{
     thread th_audio;
 	atomic<bool> video_keep_run;
 	atomic<bool> audio_keep_run;
+    double timestamp;
 public:
 	fplayer(){
 		pFormatCtx = NULL;
@@ -164,16 +170,37 @@ public:
 			}
 			if(pFormatCtx != nullptr){
 				avformat_close_input(&pFormatCtx);
-				avcodec_free_context(&video_pcodec_ctx);
 			}
 			return -1;
 		}
 		return 0;
 	}
+    int get_audio_sample_ate(){
+        if(audio_pcodec_ctx != nullptr)
+            return audio_pcodec_ctx->sample_rate;
+        else
+            return -1;
+    }
+    int get_audio_channel(){
+        if(audio_pcodec_ctx != nullptr)
+            return audio_pcodec_ctx->channels;
+        else
+            return -1;
+    }
+    AVSampleFormat get_audio_format(){
+        if(audio_pcodec_ctx != nullptr)
+            return audio_pcodec_ctx->sample_fmt;
+        else
+            return AV_SAMPLE_FMT_NONE;
+    }
 	int run(){
 		video_keep_run = true;
 		audio_keep_run = true;
+        timestamp = 0;
+#if 1
         th_video = thread([this](){
+            int ret;
+            double timeBase = av_q2d(this->pFormatCtx->streams[videoindex]->time_base);
 			AVPacket *frame_pkt = av_packet_alloc();
 			AVFrame *pframeYUV = av_frame_alloc();
 			AVFrame *pframeRGB = av_frame_alloc();
@@ -185,9 +212,17 @@ public:
 					this->dst_height,
 					AV_PIX_FMT_RGB565LE,
 					SWS_BICUBIC, NULL, NULL, NULL);
-			while(av_read_frame(this->pFormatCtx, frame_pkt) >= 0 && this->video_keep_run){
+            while(true){
+                {
+                    unique_lock<mutex> lock(frame_lock);
+                    ret = av_read_frame(this->pFormatCtx, frame_pkt);
+                }
+                if(ret < 0 || (!this->video_keep_run))
+                    break;
 				if(frame_pkt->stream_index == videoindex){
-                    qDebug() << "get video frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base);
+                    double display_time = frame_pkt->pts * timeBase;
+                    qDebug() << "get video frame pts " << frame_pkt->pts << " time " << display_time;
+                    while(display_time > this->timestamp){ usleep(10e3); }
                     // qDebug() << "video_pstream->time_base " << video_pstream->time_base
 					avcodec_send_packet(this->video_pcodec_ctx, frame_pkt);
 					while(avcodec_receive_frame(this->video_pcodec_ctx, pframeYUV) == 0){
@@ -197,9 +232,8 @@ public:
 						sws_scale(pImgCvtCtx, pframeYUV->data, pframeYUV->linesize, 0, pframeYUV->height,
 								pframeRGB->data, pframeRGB->linesize);
 						//double tp = frame_pkt->pts*av_q2d(this->pFormatCtx->streams[videoindex]->time_base);
-                        usleep(60e3);
 						if(videoCallBack)
-							videoCallBack(img_rgb);
+                            videoCallBack(img_rgb, this->dst_width, this->dst_height);
 						else
 							free((void *)img_rgb);
 						av_frame_unref(pframeYUV);
@@ -213,24 +247,40 @@ public:
 			av_packet_free(&frame_pkt);
 		});
         qDebug() << "thread video decoder success.";
-        if(audioindex<0)
-            return 0;
+#endif
+#if 1
         th_audio = thread([this](){
+            int ret;
+            double timeBase = av_q2d(this->pFormatCtx->streams[audioindex]->time_base);
 			AVPacket *frame_pkt = av_packet_alloc();
 			AVFrame *pframePCM = av_frame_alloc();
 			int frame_size = av_get_bytes_per_sample(this->audio_pcodec_ctx->sample_fmt);
-			int channel_num = this->audio_pcodec_ctx->channels;
-			while(av_read_frame(this->pFormatCtx, frame_pkt) >= 0 && this->audio_keep_run){
+            while(true){
+                {
+                    unique_lock<mutex> lock(frame_lock);
+                    ret = av_read_frame(this->pFormatCtx, frame_pkt);
+                }
+                if(ret < 0 || (!this->audio_keep_run))
+                    break;
 				if(frame_pkt->stream_index == audioindex){
-                    qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base);
+                    double display_time = frame_pkt->pts * timeBase;
+                    qDebug() << "get audio frame pts " << frame_pkt->pts << " time " << display_time;
+                    this->timestamp = display_time;
 					avcodec_send_packet(this->audio_pcodec_ctx, frame_pkt);
 					while(avcodec_receive_frame(this->audio_pcodec_ctx, pframePCM) == 0){
-						auto audio_pcm = (uint8_t*)malloc(frame_size*pframePCM->nb_samples*channel_num);
-						for(int i=0; i<pframePCM->nb_samples; i++)
-							for(int k=0; k<channel_num; k++)
-								memcpy(audio_pcm, pframePCM->data[k]+frame_size*i, frame_size);
+                        auto audio_pcm = (uint8_t*)malloc(frame_size*pframePCM->nb_samples*this->audio_pcodec_ctx->channels);
+                        if(av_sample_fmt_is_planar(this->audio_pcodec_ctx->sample_fmt)){
+                            for(int i=0; i<pframePCM->nb_samples; i++)
+                                for(int k=0; k<this->audio_pcodec_ctx->channels; k++)
+                                    memcpy(audio_pcm, pframePCM->data[k]+frame_size*i, frame_size);
+                        }else{
+                            for(int i=0; i<pframePCM->nb_samples; i++)
+                                for(int k=0; k<this->audio_pcodec_ctx->channels; k++)
+                                    memcpy(audio_pcm, pframePCM->data[0]+frame_size*(this->audio_pcodec_ctx->channels*i+k), frame_size);
+                        }
+                        usleep(60e3);
 						if(audioCallBack)
-							audioCallBack(audio_pcm);
+                            audioCallBack(audio_pcm, pframePCM->nb_samples, this->audio_pcodec_ctx->channels);
 						else
 							free((void *)audio_pcm);
 						av_frame_unref(pframePCM);
@@ -241,6 +291,7 @@ public:
 			av_packet_free(&frame_pkt);
 		});
         qDebug() << "thread audio decoder success.";
+#endif
 		return 0;
 	}
 };

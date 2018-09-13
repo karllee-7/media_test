@@ -36,8 +36,8 @@ protected:
 
 private:
     karl::fplayer *player;
-    void video_callback(uint8_t *data);
-    void audio_callback(uint8_t *data);
+    void video_callback(uint8_t *data, int width, int height);
+    void audio_callback(uint8_t *data, int length, int channel);
 };
 /*===================================================================================*/
 

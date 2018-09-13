@@ -4,10 +4,11 @@
 #define ALSA_PCM_NEW_HW_PARAMS_API
 #include <alsa/asoundlib.h>
 
-class alsa_intf{
+namespace karl{
 
-public:
+class alsa_intf{
     snd_pcm_t *handle;
+public:
     alsa_intf(const char* pcm_name="default",
               snd_pcm_format_t format=SND_PCM_FORMAT_S16_LE,
               uint32_t channel=2,
@@ -44,5 +45,7 @@ public:
         return snd_pcm_writei(handle, buffer, frames);
     }
 };
+
+}
 
 #endif // ALSA_INTF_H
