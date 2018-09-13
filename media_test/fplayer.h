@@ -11,6 +11,7 @@ extern "C"
 #include <libavutil/imgutils.h>
 #include <libavdevice/avdevice.h>
 #include <libswscale/swscale.h>
+#include <unistd.h>
 #ifdef __cplusplus
 };
 #endif
@@ -18,12 +19,14 @@ extern "C"
 #include <thread>
 #include <atomic>
 #include <iostream>
+#include <functional>
+#include <QDebug>
 
-//using std::thread;
+namespace karl{
+using std::thread;
 using std::atomic;
 using std::cout;
 using std::endl;
-
 /*===================================================================================*/
 class vError : public std::exception
 {
@@ -41,27 +44,27 @@ public:
 
         int err(void) const { return err_; }
 };
+typedef std::function<void(uint8_t* data)> fplayerCallBack;
 /*===================================================================================*/
-
 class fplayer{
 	int dst_width;
 	int dst_height;
 	AVFormatContext *pFormatCtx;
-	void (*fnc_videoCallBack)(const uint8_t *ptr);
-	void (*fnc_audioCallBack)(const uint8_t *ptr);
+	fplayerCallBack videoCallBack;
+	fplayerCallBack audioCallBack;
 	int videoindex;
 	int audioindex;
 	AVCodecContext *video_pcodec_ctx;
 	AVCodecContext *audio_pcodec_ctx;
-	std::thread th_video;
-	std::thread th_audio;
+    thread th_video;
+    thread th_audio;
 	atomic<bool> video_keep_run;
 	atomic<bool> audio_keep_run;
 public:
 	fplayer(){
 		pFormatCtx = NULL;
-		fnc_videoCallBack = NULL;
-		fnc_audioCallBack = NULL;
+		videoCallBack = NULL;
+		audioCallBack = NULL;
 		videoindex = -1;
 		audioindex = -1;
 		video_pcodec_ctx = NULL;
@@ -89,8 +92,8 @@ public:
 			avcodec_free_context(&video_pcodec_ctx);
 		}
 	}
-	int open(const char* name, int out_width, int out_height, void (*videoCallBack)(const uint8_t *ptr),
-					void (*audioCallBack)(const uint8_t *ptr)){
+	int open(const char* name, int out_width, int out_height, fplayerCallBack p_videoCallBack,
+					fplayerCallBack p_audioCallBack){
 		int ret;
 		char errbuf[1024];
 		av_register_all();
@@ -124,7 +127,7 @@ public:
 				ret = avcodec_open2(video_pcodec_ctx, video_pcodec, NULL);
 				if(ret)
 					throw vError(-1, "open video decoder error.");
-				qDebug() << "open video decoder success." << endl;
+                qDebug() << "open video decoder success.";
 			}
 			if(audioindex < 0)
 				qWarning() << "media player warning: no audio stream found.";
@@ -140,14 +143,14 @@ public:
 				ret = avcodec_open2(audio_pcodec_ctx, audio_pcodec, NULL);
 				if(ret)
 					throw vError(-1, "open audio decoder error.");
-				qDebug() << "audio sample_rate " << audio_pcodec_ctx->sample_rate << endl;
-				qDebug() << "audio channels " << audio_pcodec_ctx->channels << endl;
-				qDebug() << "open audio decoder success." << endl;
+                qDebug() << "audio sample_rate " << audio_pcodec_ctx->sample_rate;
+                qDebug() << "audio channels " << audio_pcodec_ctx->channels;
+                qDebug() << "open audio decoder success.";
 			}
 			dst_width = out_width;
 			dst_height = out_height;
-			fnc_videoCallBack = videoCallBack;
-			fnc_audioCallBack = audioCallBack;
+			videoCallBack = p_videoCallBack;
+			audioCallBack = p_audioCallBack;
 		}
 		catch(vError err){
 			qCritical("media player error: %s | code %d\n", err.what(), err.err());
@@ -170,7 +173,7 @@ public:
 	int run(){
 		video_keep_run = true;
 		audio_keep_run = true;
-		th_video = std::thread([this](){
+        th_video = thread([this](){
 			AVPacket *frame_pkt = av_packet_alloc();
 			AVFrame *pframeYUV = av_frame_alloc();
 			AVFrame *pframeRGB = av_frame_alloc();
@@ -184,8 +187,8 @@ public:
 					SWS_BICUBIC, NULL, NULL, NULL);
 			while(av_read_frame(this->pFormatCtx, frame_pkt) >= 0 && this->video_keep_run){
 				if(frame_pkt->stream_index == videoindex){
-					cout << "get video frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
-					// qDebug() << "video_pstream->time_base " << video_pstream->time_base
+                    qDebug() << "get video frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base);
+                    // qDebug() << "video_pstream->time_base " << video_pstream->time_base
 					avcodec_send_packet(this->video_pcodec_ctx, frame_pkt);
 					while(avcodec_receive_frame(this->video_pcodec_ctx, pframeYUV) == 0){
 						auto img_rgb = (uint8_t *)malloc(sizeof(uint16_t)*this->dst_width*this->dst_height);
@@ -194,9 +197,9 @@ public:
 						sws_scale(pImgCvtCtx, pframeYUV->data, pframeYUV->linesize, 0, pframeYUV->height,
 								pframeRGB->data, pframeRGB->linesize);
 						//double tp = frame_pkt->pts*av_q2d(this->pFormatCtx->streams[videoindex]->time_base);
-						//usleep(60e3);
-						if(fnc_videoCallBack)
-							fnc_videoCallBack(img_rgb);
+                        usleep(60e3);
+						if(videoCallBack)
+							videoCallBack(img_rgb);
 						else
 							free((void *)img_rgb);
 						av_frame_unref(pframeYUV);
@@ -209,22 +212,25 @@ public:
 			av_frame_free(&pframeRGB);
 			av_packet_free(&frame_pkt);
 		});
-		th_audio = std::thread([this](){
+        qDebug() << "thread video decoder success.";
+        if(audioindex<0)
+            return 0;
+        th_audio = thread([this](){
 			AVPacket *frame_pkt = av_packet_alloc();
 			AVFrame *pframePCM = av_frame_alloc();
 			int frame_size = av_get_bytes_per_sample(this->audio_pcodec_ctx->sample_fmt);
 			int channel_num = this->audio_pcodec_ctx->channels;
 			while(av_read_frame(this->pFormatCtx, frame_pkt) >= 0 && this->audio_keep_run){
 				if(frame_pkt->stream_index == audioindex){
-					qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base) << endl;
+                    qDebug() << "get audio frame pts " << frame_pkt->pts*av_q2d(this->pFormatCtx->streams[frame_pkt->stream_index]->time_base);
 					avcodec_send_packet(this->audio_pcodec_ctx, frame_pkt);
 					while(avcodec_receive_frame(this->audio_pcodec_ctx, pframePCM) == 0){
 						auto audio_pcm = (uint8_t*)malloc(frame_size*pframePCM->nb_samples*channel_num);
 						for(int i=0; i<pframePCM->nb_samples; i++)
 							for(int k=0; k<channel_num; k++)
 								memcpy(audio_pcm, pframePCM->data[k]+frame_size*i, frame_size);
-						if(fnc_audioCallBack)
-							fnc_audioCallBack(audio_pcm);
+						if(audioCallBack)
+							audioCallBack(audio_pcm);
 						else
 							free((void *)audio_pcm);
 						av_frame_unref(pframePCM);
@@ -234,9 +240,11 @@ public:
 			av_frame_free(&pframePCM);
 			av_packet_free(&frame_pkt);
 		});
+        qDebug() << "thread audio decoder success.";
 		return 0;
 	}
 };
 
+}
 
 #endif

@@ -17,7 +17,6 @@ using std::string;
 class mediaPlayer : public QObject{
     Q_OBJECT
     Q_ENUMS(CMD_KEY)
-    fplayer *player;
 public:
     enum CMD_KEY{
         V_START,
@@ -34,21 +33,11 @@ signals:
 signals:
     void videoExit(int flag); // flag not use, default 0
 protected:
-    void run() override;
+
 private:
-    QString file_name;
-    struct {
-        std::atomic<bool> stop;
-        std::atomic<bool> pause;
-        std::atomic<bool> resume;
-    }request;
-    struct {
-        std::atomic<bool> started;
-        std::atomic<bool> running;
-    }status;
-    double time_start_s;
-    int dst_width;
-    int dst_height;
+    karl::fplayer *player;
+    void video_callback(uint8_t *data);
+    void audio_callback(uint8_t *data);
 };
 /*===================================================================================*/
 
