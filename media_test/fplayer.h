@@ -32,175 +32,159 @@ using std::unique_lock;
 using std::cout;
 using std::endl;
 /*===================================================================================*/
-class vError : public std::exception
-{
-private:
-        int err_;
-        const char * errStr_;
-public:
-        vError(int err, const char * errStr) : err_(err), errStr_(errStr){}
-
-        ~vError() throw() {}
-
-        const char * what() const throw (){
-                return errStr_;
-        }
-
-        int err(void) const { return err_; }
-};
 typedef std::function<void(uint8_t*, int, int)> fplayerCallBack;
 /*===================================================================================*/
 class fplayer{
-    mutex frame_lock;
+	mutex frame_lock;
 	int dst_width;
 	int dst_height;
 	AVFormatContext *pFormatCtx;
+	AVCodecContext *video_pcodec_ctx;
+	AVCodecContext *audio_pcodec_ctx;
 	fplayerCallBack videoCallBack;
 	fplayerCallBack audioCallBack;
 	int videoindex;
 	int audioindex;
-	AVCodecContext *video_pcodec_ctx;
-	AVCodecContext *audio_pcodec_ctx;
-    thread th_video;
-    thread th_audio;
+	thread th_video;
+	thread th_audio;
 	atomic<bool> video_keep_run;
 	atomic<bool> audio_keep_run;
-    double timestamp;
+	double timestamp;
 public:
-	fplayer(){
-		pFormatCtx = NULL;
-		videoCallBack = NULL;
-		audioCallBack = NULL;
-		videoindex = -1;
-		audioindex = -1;
-		video_pcodec_ctx = NULL;
-		audio_pcodec_ctx = NULL;
-		//th_video = NULL;
-		//th_audio = NULL;
-	}
-	~fplayer(){
+     	void cleanup(){
 		video_keep_run = false;
 		audio_keep_run = false;
 		if(th_video.joinable())
 			th_video.join();
 		if(th_audio.joinable())
 			th_audio.join();
-		if(video_pcodec_ctx != nullptr){
-			avcodec_close(video_pcodec_ctx);
-			avcodec_free_context(&video_pcodec_ctx);
-		}
-		if(audio_pcodec_ctx != nullptr){
-			avcodec_close(audio_pcodec_ctx);
-			avcodec_free_context(&audio_pcodec_ctx);
-		}
-		if(pFormatCtx != nullptr){
-			avformat_close_input(&pFormatCtx);
-			avcodec_free_context(&video_pcodec_ctx);
-		}
+        	if(video_pcodec_ctx != NULL){
+                	avcodec_close(video_pcodec_ctx);
+                        avcodec_free_context(&video_pcodec_ctx);
+			video_pcodec_ctx = NULL;
+                }
+                if(audio_pcodec_ctx != NULL){
+                        avcodec_close(audio_pcodec_ctx);
+                        avcodec_free_context(&audio_pcodec_ctx);
+			audio_pcodec_ctx = NULL;
+                }
+                if(pFormatCtx != nullptr){
+                        avformat_close_input(&pFormatCtx);
+			avformat_free_context(pFormatCtx);
+			pFormatCtx = NULL;
+                }
+		videoindex = -1;
+		audioindex = -1;
+		videoCallBack = NULL;
+		audioCallBack = NULL;
+		video_keep_run = true;
+		audio_keep_run = true;
 	}
-	int open(const char* name, int out_width, int out_height, fplayerCallBack p_videoCallBack,
+	fplayer(){
+		dst_width = 640;
+		dst_height = 480;
+		videoCallBack = NULL;
+		audioCallBack = NULL;
+		videoindex = -1;
+		audioindex = -1;
+		pFormatCtx = NULL;
+		video_pcodec_ctx = NULL;
+		audio_pcodec_ctx = NULL;
+		video_keep_run = true;
+		audio_keep_run = true;
+	}
+	~fplayer(){
+		cleanup();
+	}
+	int play(const char* filename, int out_width, int out_height, 
+					fplayerCallBack p_videoCallBack,
 					fplayerCallBack p_audioCallBack){
 		int ret;
-		char errbuf[1024];
-		av_register_all();
-		try{
-			pFormatCtx = avformat_alloc_context();
-			ret = avformat_open_input(&pFormatCtx, name, NULL, NULL);
-			if(ret < 0){
-				av_strerror(ret, errbuf, sizeof(errbuf));
-				throw vError(ret, errbuf);
-			}
-			avformat_find_stream_info(pFormatCtx, NULL);
-			for(int i=0; i<(int)pFormatCtx->nb_streams; i++) {
-				if(pFormatCtx->streams[i]->codecpar->codec_type==AVMEDIA_TYPE_VIDEO){
-					videoindex = i;
-				}
-				if(pFormatCtx->streams[i]->codecpar->codec_type==AVMEDIA_TYPE_AUDIO){
-					audioindex = i;
-				}
-			}
-			if(videoindex < 0)
-				throw vError(-1, "cant fine video stream.");
-			else {
-				av_dump_format(pFormatCtx, videoindex, name, 0);
-				AVStream *video_pstream = pFormatCtx->streams[videoindex];
-				AVCodec *video_pcodec =  avcodec_find_decoder(video_pstream->codecpar->codec_id);
-				if(video_pcodec == nullptr)
-					throw vError(-1, "cant find the video decoder.");
-				video_pcodec_ctx = avcodec_alloc_context3(video_pcodec);
-				avcodec_parameters_to_context(video_pcodec_ctx, video_pstream->codecpar);
-				av_codec_set_pkt_timebase(video_pcodec_ctx, video_pstream->time_base);
-				ret = avcodec_open2(video_pcodec_ctx, video_pcodec, NULL);
-				if(ret)
-					throw vError(-1, "open video decoder error.");
-                qDebug() << "open video decoder success.";
-			}
-			if(audioindex < 0)
-				qWarning() << "media player warning: no audio stream found.";
-			else {
-				av_dump_format(pFormatCtx, audioindex, name, 0);
-				AVStream *audio_pstream = pFormatCtx->streams[audioindex];
-				AVCodec *audio_pcodec =  avcodec_find_decoder(audio_pstream->codecpar->codec_id);
-				if(audio_pcodec == nullptr)
-					throw vError(-1, "cant find the audio decoder.");
-				audio_pcodec_ctx = avcodec_alloc_context3(audio_pcodec);
-				avcodec_parameters_to_context(audio_pcodec_ctx, audio_pstream->codecpar);
-				av_codec_set_pkt_timebase(audio_pcodec_ctx, audio_pstream->time_base);
-				ret = avcodec_open2(audio_pcodec_ctx, audio_pcodec, NULL);
-				if(ret)
-					throw vError(-1, "open audio decoder error.");
-                qDebug() << "audio sample_rate " << audio_pcodec_ctx->sample_rate;
-                qDebug() << "audio channels " << audio_pcodec_ctx->channels;
-                qDebug() << "open audio decoder success.";
-			}
-			dst_width = out_width;
-			dst_height = out_height;
-			videoCallBack = p_videoCallBack;
-			audioCallBack = p_audioCallBack;
-		}
-		catch(vError err){
-			qCritical("media player error: %s | code %d\n", err.what(), err.err());
-			if(video_pcodec_ctx != nullptr){
-				avcodec_close(video_pcodec_ctx);
-				avcodec_free_context(&video_pcodec_ctx);
-			}
-			if(audio_pcodec_ctx != nullptr){
-				avcodec_close(audio_pcodec_ctx);
-				avcodec_free_context(&audio_pcodec_ctx);
-			}
-			if(pFormatCtx != nullptr){
-				avformat_close_input(&pFormatCtx);
-			}
+		//char errbuf[1024];
+		if(pFormatCtx != NULL){
+			qDebug() << "fplayer is busy.";
 			return -1;
 		}
-		return 0;
+		av_register_all();
+		pFormatCtx = avformat_alloc_context();
+		if(pFormatCtx == NULL){
+			qDebug() << "avformat_alloc_context error.";
+			return -1;
+		}
+		ret = avformat_open_input(&pFormatCtx, filename, NULL, NULL);
+		if(ret < 0){
+			qDebug() << "avformat_open_input error.";
+			cleanup();
+			//av_strerror(ret, errbuf, sizeof(errbuf));
+			return -1;
+		}
+		avformat_find_stream_info(pFormatCtx, NULL);
+		for(int i=0; i<(int)pFormatCtx->nb_streams; i++) {
+			if(pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
+				videoindex = i;
+			}
+			if(pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO){
+				audioindex = i;
+			}
+		}
+		if(videoindex < 0){
+			qDebug() << "can not find video stream.";
+			cleanup();
+			return -1;
+		}
+		if(audioindex < 0){
+			qDebug() << "can not find audio stream.";
+			cleanup();
+			return -1;
+		}
+		av_dump_format(pFormatCtx, videoindex, filename, 0);
+		av_dump_format(pFormatCtx, audioindex, filename, 0);
+
+		AVStream *video_pstream = pFormatCtx->streams[videoindex];
+		AVCodec *video_pcodec =  avcodec_find_decoder(video_pstream->codecpar->codec_id);
+		if(video_pcodec == NULL){
+			qDebug() << "cant find the video decoder.";
+			cleanup();
+			return -1;
+		}
+		video_pcodec_ctx = avcodec_alloc_context3(video_pcodec);
+		avcodec_parameters_to_context(video_pcodec_ctx, video_pstream->codecpar);
+		av_codec_set_pkt_timebase(video_pcodec_ctx, video_pstream->time_base);
+		ret = avcodec_open2(video_pcodec_ctx, video_pcodec, NULL);
+		if(ret){
+			qDebug() << "open video decoder error.";
+			cleanup();
+			return -1;
+		}
+		AVStream *audio_pstream = pFormatCtx->streams[audioindex];
+		AVCodec *audio_pcodec =  avcodec_find_decoder(audio_pstream->codecpar->codec_id);
+		if(audio_pcodec == nullptr){
+			qDebug() << "cant find the audio decoder.";
+			cleanup();
+			return -1;
+		}
+		audio_pcodec_ctx = avcodec_alloc_context3(audio_pcodec);
+		avcodec_parameters_to_context(audio_pcodec_ctx, audio_pstream->codecpar);
+		av_codec_set_pkt_timebase(audio_pcodec_ctx, audio_pstream->time_base);
+		ret = avcodec_open2(audio_pcodec_ctx, audio_pcodec, NULL);
+		if(ret){
+			qDebug() << "open audio decoder error.";
+			cleanup();
+			return -1;
+		}
+		dst_width = out_width;
+		dst_height = out_height;
+		videoCallBack = p_videoCallBack;
+		audioCallBack = p_audioCallBack;
 	}
-    int get_audio_sample_ate(){
-        if(audio_pcodec_ctx != nullptr)
-            return audio_pcodec_ctx->sample_rate;
-        else
-            return -1;
-    }
-    int get_audio_channel(){
-        if(audio_pcodec_ctx != nullptr)
-            return audio_pcodec_ctx->channels;
-        else
-            return -1;
-    }
-    AVSampleFormat get_audio_format(){
-        if(audio_pcodec_ctx != nullptr)
-            return audio_pcodec_ctx->sample_fmt;
-        else
-            return AV_SAMPLE_FMT_NONE;
-    }
 	int run(){
 		video_keep_run = true;
 		audio_keep_run = true;
-        timestamp = 0;
+		timestamp = 0;
 #if 1
-        th_video = thread([this](){
-            int ret;
-            double timeBase = av_q2d(this->pFormatCtx->streams[videoindex]->time_base);
+		th_video = thread([this](){
+		int ret;
+		double timeBase = av_q2d(this->pFormatCtx->streams[videoindex]->time_base);
 			AVPacket *frame_pkt = av_packet_alloc();
 			AVFrame *pframeYUV = av_frame_alloc();
 			AVFrame *pframeRGB = av_frame_alloc();
