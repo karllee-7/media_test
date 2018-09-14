@@ -23,6 +23,7 @@ extern "C"
 #include <iostream>
 #include <functional>
 #include <QDebug>
+#include "karl_queue.h"
 
 namespace karl{
 using std::thread;
@@ -45,19 +46,26 @@ class fplayer{
 	fplayerCallBack audioCallBack;
 	int videoindex;
 	int audioindex;
+	thread th_packet;
 	thread th_video;
 	thread th_audio;
+	atomic<bool> packet_keep_run;
 	atomic<bool> video_keep_run;
 	atomic<bool> audio_keep_run;
+	karl_queue<AVPacket*> video_queue;
+	karl_queue<AVPacket*> audio_queue;
 	double timestamp;
 public:
      	void cleanup(){
+		packet_keep_run = false;
 		video_keep_run = false;
 		audio_keep_run = false;
 		if(th_video.joinable())
 			th_video.join();
 		if(th_audio.joinable())
 			th_audio.join();
+		if(th_packet.joinable())
+			th_packet.join();
         	if(video_pcodec_ctx != NULL){
                 	avcodec_close(video_pcodec_ctx);
                         avcodec_free_context(&video_pcodec_ctx);
@@ -77,6 +85,7 @@ public:
 		audioindex = -1;
 		videoCallBack = NULL;
 		audioCallBack = NULL;
+		packet_keep_run = true;
 		video_keep_run = true;
 		audio_keep_run = true;
 	}
@@ -90,6 +99,7 @@ public:
 		pFormatCtx = NULL;
 		video_pcodec_ctx = NULL;
 		audio_pcodec_ctx = NULL;
+		packet_keep_run = true;
 		video_keep_run = true;
 		audio_keep_run = true;
 	}
@@ -176,6 +186,58 @@ public:
 		dst_height = out_height;
 		videoCallBack = p_videoCallBack;
 		audioCallBack = p_audioCallBack;
+		/*===========================================================================*/
+		th_packet= thread([this](){
+			int ret;
+			double timeBase = av_q2d(pFormatCtx->streams[videoindex]->time_base);
+			while(true){
+				AVPacket *frame_pkt = av_packet_alloc();
+				ret = av_read_frame(pFormatCtx, frame_pkt);
+				if(ret < 0 || (!packet_keep_run))
+					break;
+				if(frame_pkt->stream_index == videoindex){
+					unique_lock<mutex> lock(video_queue._lock);
+					if(video_queue._queue.is_full())
+						video_queue._cv.wait(lock, [this]{return !video_queue._queue.is_full();});
+					video_queue._queue.push(frame_pkt);
+					video_queue._cv.notify_all();
+				}else if(frame_pkt->stream_index == audioindex){
+					unique_lock<mutex> lock(audio_queue._lock);
+					if(audio_queue._queue.is_full())
+						audio_queue._cv.wait(lock, [this]{return !audio_queue._queue.is_full();});
+					audio_queue._queue.push(frame_pkt);
+					audio_queue._cv.notify_all();
+				}
+			}
+		});
+		th_video = thread([this](){
+			int ret;
+			double timeBase = av_q2d(pFormatCtx->streams[videoindex]->time_base);
+			AVPacket *frame_pkt;
+			AVFrame *pframeYUV = av_frame_alloc();
+			AVFrame *pframeRGB = av_frame_alloc();
+			SwsContext *pImgCvtCtx = sws_getContext(
+					this->video_pcodec_ctx->width,
+					this->video_pcodec_ctx->height,
+					this->video_pcodec_ctx->pix_fmt,
+					this->dst_width,
+					this->dst_height,
+					AV_PIX_FMT_RGB565LE,
+					SWS_BICUBIC, NULL, NULL, NULL);
+			while(video_keep_run){
+				{
+					unique_lock<mutex> lock(video_queue._lock);
+					if(video_queue.is_empty())
+						video_queue._cv.wait(lock, [this]{return !video_queue._queue.is_empty();});
+					frame_pkt = video_queue._queue.front();
+				}
+				avcodec_send_packet(video_pcodec_ctx, frame_pkt);
+				while(avcodec_receive_frame(this->video_pcodec_ctx, pframeYUV) == 0){
+					auto img_rgb = (uint8_t *)malloc(sizeof(uint16_t)*this->dst_width*this->dst_height);
+					av_image_fill_arrays(pframeRGB->data, pframeRGB->linesize, (const uint8_t *)img_rgb,
+							
+						
+		});
 	}
 	int run(){
 		video_keep_run = true;

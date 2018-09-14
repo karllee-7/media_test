@@ -39,10 +39,9 @@ class karl_queue{
 public:
 	mutex _lock;
 	condition_variable _cv;
-	atomic<bool> _connected;
 	queue<T> _queue;
 	uint32_t _limit;
-	msgQueue(unsigned int limit = 1):_limit(limit), _connected(true){
+	msgQueue(unsigned int limit = 1):_limit(limit){
 	}
 	~msgQueue(){
 	}
@@ -72,8 +71,7 @@ public:
 			return tmp;
 		}
 	}
-	unsigned int size(){
-		unique_lock<mutex> lock(_lock);
+	int size(){
 		return _queue.size();
 	}
 	bool is_full(){
@@ -81,16 +79,6 @@ public:
 	}
 	bool is_empty(){
 		return (_queue.size() == 0);
-	}
-	void discon(){
-		unique_lock<mutex> lock(_lock);
-		while(!_queue.empty()){
-			T inst = _queue.back();
-			_queue.pop();
-		}
-		_connected.store(false);
-		_cv_i.notify_all();
-		_cv_o.notify_all();
 	}
 };
 
