@@ -6,10 +6,10 @@
 
 namespace karl{
 
-class alsa_intf{
+class alsa_ctrl{
     snd_pcm_t *handle;
 public:
-    alsa_intf(const char* pcm_name="default",
+    alsa_ctrl(const char* pcm_name="default",
               snd_pcm_format_t format=SND_PCM_FORMAT_S16_LE,
               uint32_t channel=2,
               uint32_t rate=44100,
@@ -17,6 +17,7 @@ public:
         int re;
         int dir;
         handle = NULL;
+	snd_pcm_hw_params_t params;
         re = snd_pcm_open(&handle, pcm_name, SND_PCM_STREAM_PLAYBACK, 0);
         if (re < 0){
             printf("unable to open pcm device: %s\n",snd_strerror(re));
@@ -37,7 +38,7 @@ public:
             return;
         }
     }
-    ~alsa_intf(){
+    ~alsa_ctrl(){
         if(handle != NULL)
             snd_pcm_close(handle);
     }

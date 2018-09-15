@@ -14,7 +14,8 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 SOURCES += \
         main.cpp \
-    media_player.cpp
+    media_player.cpp \
+    fplayer.cpp
 
 RESOURCES += qml.qrc
 
@@ -45,5 +46,5 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 HEADERS += \
     media_player.h \
     ximageprovider.h \
-    alsa_intf.h \
-    fplayer.h
+    fplayer.h \
+    karl_thread.h
