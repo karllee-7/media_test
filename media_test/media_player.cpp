@@ -34,12 +34,15 @@ void mediaPlayer::audio_callback(uint8_t *data, int length, int channel){
         free(data);
     //qDebug() << "audio_callback length " << length << " channel " << channel;
 }
-    
+void mediaPlayer::exit_callback(){
+    qDebug() << "fplayer exit.";
+}
 int mediaPlayer::open(const QString a, int width, int height){
     int re;
     karl::fplayerVideoCallBack f0 = std::bind(&mediaPlayer::video_callback, this, _1, _2, _3);
     karl::fplayerAudioCallBack f1 = std::bind(&mediaPlayer::audio_callback, this, _1, _2, _3);
-    re = player->play(a.toStdString().c_str(), width, height, f0, f1);
+    karl::fplayerExitCallBack f2 = std::bind(&mediaPlayer::exit_callback, this);
+    re = player->play(a.toStdString(), width, height, f0, NULL, f2);
     if(re){
         qDebug() << "player open error";
         return -1;

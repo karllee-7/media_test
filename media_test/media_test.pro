@@ -19,15 +19,23 @@ SOURCES += \
 
 RESOURCES += qml.qrc
 
+#DEFINES += __arm__
 
+if(contains(DEFINES,__arm__)){
+message("compile for arm")
+INCLUDEPATH += /opt/ffmpeg-3.4.2-armhf-4.9.4/include
+INCLUDEPATH += /opt/alsa-lib-1.0.29-armhf-4.9.4/include
+LIBS += -L/opt/ffmpeg-3.4.2-armhf-4.9.4/lib
+LIBS += -L/opt/alsa-lib-1.0.29-armhf-4.9.4/lib
+}else{
+message("compile for x86")
 INCLUDEPATH += /opt/ffmpeg-3.4.2/include
 INCLUDEPATH += /opt/alsa-lib-1.1.6/include
-#INCLUDEPATH += /opt/ffmpeg-3.4.2-armhf-4.9.4/include
-#INCLUDEPATH += /opt/cedarx-12.06.2015-armhf-4.9.4/include/
-
 LIBS += -L/opt/ffmpeg-3.4.2/lib
 LIBS += -L/opt/alsa-lib-1.1.6/lib
-#LIBS += -L/opt/ffmpeg-3.4.2-armhf-4.9.4/lib
+}
+
+#INCLUDEPATH += /opt/cedarx-12.06.2015-armhf-4.9.4/include/
 LIBS += -lavformat -lavcodec -lavutil -lswscale -lswresample -lasound -lpthread
 #LIBS += -L/opt/cedarx-12.06.2015-armhf-4.9.4/lib
 #LIBS += -lcedar_vdecoder -lcedar_common -lcedar_base
