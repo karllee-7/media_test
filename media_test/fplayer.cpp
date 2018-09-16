@@ -1,9 +1,11 @@
 #include "fplayer.h"
 #include <functional>
+#include <chrono>
 
 namespace karl{
 using namespace std::placeholders;
 using std::bind;
+using std::chrono::milliseconds;
 /*===================================================================================*/
 fplayer::fplayer():video_queue(30), audio_queue(30){
 }
@@ -17,6 +19,7 @@ fplayer::~fplayer(){
 }
 //----------------------------------------------------------------------------
 void fplayer::take_packet(AVFormatContext *format_ctx, int videoindex, int audioindex){
+    qDebug() << "thread take_packet start.";
     int ret;
     while(packet_keep_run){
         AVPacket *frame_pkt = av_packet_alloc();
@@ -25,18 +28,23 @@ void fplayer::take_packet(AVFormatContext *format_ctx, int videoindex, int audio
             break;
         if(frame_pkt->stream_index == videoindex){
             unique_lock<mutex> lock(video_queue._lock);
-            if(video_queue.is_full())
-                video_queue._cv.wait(lock, [this]{return !video_queue.is_full();});
-            video_queue._queue.push(frame_pkt);
-            video_queue._cv.notify_all();
+            while(video_queue.is_full() && packet_keep_run)
+                video_queue._cv.wait_for(lock, milliseconds(500));
+            if(packet_keep_run){
+                video_queue._queue.push(frame_pkt);
+                video_queue._cv.notify_all();
+            }
         }else if(frame_pkt->stream_index == audioindex){
             unique_lock<mutex> lock(audio_queue._lock);
-            if(audio_queue.is_full())
-                audio_queue._cv.wait(lock, [this]{return !audio_queue.is_full();});
-            audio_queue._queue.push(frame_pkt);
-            audio_queue._cv.notify_all();
+            while(audio_queue.is_full() && packet_keep_run)
+                audio_queue._cv.wait_for(lock, milliseconds(500));
+            if(packet_keep_run){
+                audio_queue._queue.push(frame_pkt);
+                audio_queue._cv.notify_all();
+            }
         }
     }
+    qDebug() << "thread take_packet exit";
 }
 //----------------------------------------------------------------------------
 void fplayer::decode_video(AVFormatContext *format_ctx, 
@@ -44,9 +52,10 @@ void fplayer::decode_video(AVFormatContext *format_ctx,
                         int videoindex, 
                         int width, int height,
                         fplayerVideoCallBack videoCallBack){
+    qDebug() << "thread decode_video start.";
     //int ret;
     double timeBase = av_q2d(format_ctx->streams[videoindex]->time_base);
-    AVPacket *frame_pkt;
+    AVPacket *frame_pkt = NULL;
     AVFrame *pframeYUV = av_frame_alloc();
     AVFrame *pframeRGB = av_frame_alloc();
     SwsContext *pImgCvtCtx = sws_getContext(
@@ -59,12 +68,18 @@ void fplayer::decode_video(AVFormatContext *format_ctx,
     while(video_keep_run){
         {
             unique_lock<mutex> lock(video_queue._lock);
-            if(video_queue.is_empty())
-                video_queue._cv.wait(lock, [this]{return !video_queue.is_empty();});
-            frame_pkt = video_queue._queue.front();
-            video_queue._queue.pop();
-            video_queue._cv.notify_all();
+            while(video_queue.is_empty() && video_keep_run)
+                video_queue._cv.wait_for(lock, milliseconds(500));
+            if(video_keep_run){
+                frame_pkt = video_queue._queue.front();
+                video_queue._queue.pop();
+                video_queue._cv.notify_all();
+            }else{
+                frame_pkt = NULL;
+            }
         }
+        if(frame_pkt == NULL)
+            break;
         avcodec_send_packet(video_codec_ctx, frame_pkt);
         while(avcodec_receive_frame(video_codec_ctx, pframeYUV) == 0){
             auto img_rgb = (uint8_t *)malloc(sizeof(uint16_t)*width*height);
@@ -83,31 +98,30 @@ void fplayer::decode_video(AVFormatContext *format_ctx,
             else
                 free((void *)img_rgb);
             av_frame_unref(pframeYUV);
-            // usleep(60e3);
         }
         av_packet_free(&frame_pkt);
     }
-    sws_freeContext(pImgCvtCtx);
     av_frame_free(&pframeYUV);
     av_frame_free(&pframeRGB);
-};
+    sws_freeContext(pImgCvtCtx);
+    qDebug() << "thread decode_video exit";
+}
 //----------------------------------------------------------------------------
 void fplayer::decode_audio(AVFormatContext *format_ctx, 
                         AVCodecContext *audio_codec_ctx,
                         int audioindex,
                         fplayerAudioCallBack audioCallBack){
+    qDebug() << "thread decode_audio start.";
     int ret;
+    bool mute_flg;
     snd_pcm_t *handle = NULL;
     if(audioCallBack == NULL){
-        handle = pcm_open(audio_codec_ctx->channels, audio_codec_ctx->sample_rate, 512);
+        handle = pcm_open(audio_codec_ctx);
         if(handle == NULL){
             qDebug() << "open pcm error";
             return;
         }
-        qDebug() << "open pcm success, rate " << audio_codec_ctx->sample_rate;
     }
-    qDebug() <<"audio format " << audio_codec_ctx->sample_fmt;
-    qDebug() <<"audio channel_layout " << audio_codec_ctx->channel_layout;
     double timeBase = av_q2d(format_ctx->streams[audioindex]->time_base);
     int frame_size = av_get_bytes_per_sample(audio_codec_ctx->sample_fmt);
     int channels = audio_codec_ctx->channels;
@@ -116,28 +130,31 @@ void fplayer::decode_audio(AVFormatContext *format_ctx,
     while(audio_keep_run){
         {
             unique_lock<mutex> lock(audio_queue._lock);
-            if(audio_queue.is_empty())
-                audio_queue._cv.wait(lock, [this]{return !audio_queue.is_empty();});
-            frame_pkt = audio_queue._queue.front();
-            audio_queue._queue.pop();
-            audio_queue._cv.notify_all();
+            while((audio_queue.is_empty() || in_pause) && audio_keep_run)
+                audio_queue._cv.wait_for(lock, milliseconds(500));
+            if(audio_keep_run){
+                mute_flg = in_mute;
+                frame_pkt = audio_queue._queue.front();
+                audio_queue._queue.pop();
+                audio_queue._cv.notify_all();
+            }else{
+                frame_pkt = NULL;
+            }
         }
+        if(frame_pkt == NULL)
+            break;
         avcodec_send_packet(audio_codec_ctx, frame_pkt);
         while(avcodec_receive_frame(audio_codec_ctx, framePCM) == 0){
-            qDebug() << "frame_size " << frame_size;
-            qDebug() << "framePCM->nb_samples " << framePCM->nb_samples;
-            qDebug() << "audio_codec_ctx->channels " << audio_codec_ctx->channels;
-            auto pcm_data = (uint8_t*)malloc(frame_size*framePCM->nb_samples*audio_codec_ctx->channels);
-            if(av_sample_fmt_is_planar(audio_codec_ctx->sample_fmt)){
-                qDebug() << "audo is planar";
-                for(int i=0; i<framePCM->nb_samples; i++)
-                    for(int k=0; k<audio_codec_ctx->channels; k++)
+            int frame_num = framePCM->nb_samples;
+            auto pcm_data = (uint8_t*)malloc(frame_size*frame_num*channels);
+            if(mute_flg){
+                memset(pcm_data, 0, frame_size*channels*frame_num);
+            }else if(av_sample_fmt_is_planar(audio_codec_ctx->sample_fmt)){
+                for(int i=0; i<frame_num; i++)
+                    for(int k=0; k<channels; k++)
                         memcpy(pcm_data+frame_size*(channels*i+k), framePCM->data[k]+frame_size*i, frame_size);
             }else{
-                qDebug() << "audo is not planar";
-                for(int i=0; i<framePCM->nb_samples; i++)
-                    for(int k=0; k<audio_codec_ctx->channels; k++)
-                        memcpy(pcm_data+frame_size*(channels*i+k), framePCM->data[0]+frame_size*(audio_codec_ctx->channels*i+k), frame_size);
+                memcpy(pcm_data, framePCM->data[0], frame_size*channels*frame_num);
             }
             {
                 unique_lock<mutex> lock(timestamp._lock);
@@ -148,27 +165,27 @@ void fplayer::decode_audio(AVFormatContext *format_ctx,
             if(audioCallBack)
                 audioCallBack(pcm_data, framePCM->nb_samples, audio_codec_ctx->channels);
             else{
-                ret = snd_pcm_writei(handle, pcm_data, framePCM->nb_samples);//写入声卡  （放音）
+                ret = snd_pcm_writei(handle, pcm_data, frame_num);//写入声卡  （放音）
                 if (ret == -EPIPE){
                     qDebug() << "underrun occurred";
                     snd_pcm_prepare(handle);
                 }else if (ret < 0) {
                     qDebug() << "error from writei. " << snd_strerror(ret);
-                }else if (ret != framePCM->nb_samples) {
+                }else if (ret != frame_num) {
                     qDebug() << "short write, write " << ret << " frames";
                 }
                 free((void *)pcm_data);
             }
-            //usleep(30e3);
+            av_frame_unref(framePCM);
         }
         av_packet_free(&frame_pkt);
-        av_frame_unref(framePCM);
     }
     av_frame_free(&framePCM);
     if(audioCallBack == NULL){
         snd_pcm_drain(handle);
         snd_pcm_close(handle);
     }
+    qDebug() << "thread decode_audio exit.";
 };
 //----------------------------------------------------------------------------
 int fplayer::core(string filename,
@@ -176,6 +193,7 @@ int fplayer::core(string filename,
                   fplayerVideoCallBack videoCallBack,
                   fplayerAudioCallBack audioCallBack,
                   fplayerExitCallBack exitCallBack){
+    qDebug() << "thread fplayer core start.";
     int ret;
     AVFormatContext *format_ctx      = NULL;
     AVCodecContext  *video_codec_ctx = NULL;
@@ -183,18 +201,39 @@ int fplayer::core(string filename,
     int videoindex = -1;
     int audioindex = -1;
     auto cleanUp = [&](){
+        {
+            unique_lock<mutex> lock(video_queue._lock);
+            while(!video_queue.is_empty()){
+                AVPacket *frame_pkt = video_queue._queue.front();
+                av_packet_free(&frame_pkt);
+                video_queue._queue.pop();
+            }
+        }
+        qDebug() << "clean up video_queue";
+        {
+            unique_lock<mutex> lock(audio_queue._lock);
+            while(!audio_queue.is_empty()){
+                AVPacket *frame_pkt = audio_queue._queue.front();
+                av_packet_free(&frame_pkt);
+                audio_queue._queue.pop();
+            }
+        }
+        qDebug() << "clean up audio_queue";
         if(video_codec_ctx != NULL){
             avcodec_close(video_codec_ctx);
             avcodec_free_context(&video_codec_ctx);
+            qDebug() << "clean up video_codec_ctx";
         }
         if(audio_codec_ctx != NULL){
             avcodec_close(audio_codec_ctx);
             avcodec_free_context(&audio_codec_ctx);
+            qDebug() << "clean up audio_codec_ctx";
         }
         if(format_ctx != NULL){
             avformat_close_input(&format_ctx);
             avformat_free_context(format_ctx);
-        }    
+            qDebug() << "clean up format_ctx";
+        }
     };
     av_register_all();
     format_ctx = avformat_alloc_context();
@@ -263,7 +302,6 @@ int fplayer::core(string filename,
         cleanUp();
         return -1;
     }
-    //qDebug() << "open audio decoder success, rate " << audio_codec_ctx->sample_rate;
     packet_keep_run = true;
     video_keep_run = true;
     audio_keep_run = true;
@@ -286,6 +324,7 @@ int fplayer::core(string filename,
     cleanUp();
     if(exitCallBack)
         exitCallBack();
+    qDebug() << "thread fplayer core exit.";
     return 0;
 }
 int fplayer::play(string filename,
@@ -306,44 +345,53 @@ int fplayer::play(string filename,
     return 0;
 }
 //----------------------------------------------------------------------------
-snd_pcm_t *fplayer::pcm_open(unsigned int channels, unsigned int rate, unsigned int period_size){
+snd_pcm_t *fplayer::pcm_open(AVCodecContext *audio_codec_ctx){
     int ret;
-    int dir;
     snd_pcm_t *handle;
-    snd_pcm_hw_params_t *params;
-    snd_pcm_uframes_t period_size_ = period_size;
-    snd_pcm_uframes_t buffer_size_;
     ret = snd_pcm_open(&handle, "default", SND_PCM_STREAM_PLAYBACK, 0);
     if(ret < 0){
         qDebug() << "unable to open pcm device " << snd_strerror(ret);
         return NULL;
     }
-    qDebug() << "audio reat " << rate;
+#ifdef __arm__
+    int rate = audio_codec_ctx->sample_rate;
+#endif
+#ifdef __amd64__
+    int rate = 48000;
+#endif
     ret = snd_pcm_set_params(handle,
                              SND_PCM_FORMAT_S16_LE,
                              SND_PCM_ACCESS_RW_INTERLEAVED,
-                             channels,
-                             48000,
+                             audio_codec_ctx->channels,
+                             rate,
                              1,
                              500000);
-//    snd_pcm_hw_params_alloca(&params);
-//    snd_pcm_hw_params_any(handle, params);
-//    snd_pcm_hw_params_set_access(handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
-//    snd_pcm_hw_params_set_format(handle, params, SND_PCM_FORMAT_S16_LE);
-//    snd_pcm_hw_params_set_channels(handle, params, channels);
-//    snd_pcm_hw_params_set_rate_near(handle, params, &rate, &dir);
-//    snd_pcm_hw_params_set_period_size_near(handle, params, &period_size_, &dir);
-//    ret = snd_pcm_hw_params(handle, params);
     if(ret < 0){
         qDebug() << "unable to set hw parameters "  << snd_strerror(ret);
         snd_pcm_close(handle);
         return NULL;
     }
-    snd_pcm_get_params(handle, &buffer_size_, &period_size_);
-    //snd_pcm_hw_params_get_period_size(params, &period_size_, &dir);
-    qDebug() << "audio buffer_size_ " << buffer_size_;
-    qDebug() << "audio period_size_ " << period_size_;
     return handle;
+}
+void fplayer::set_pause(){
+    unique_lock<mutex> lock(audio_queue._lock);
+    in_pause = true;
+    audio_queue._cv.notify_all();
+}
+void fplayer::set_resume(){
+    unique_lock<mutex> lock(audio_queue._lock);
+    in_pause = false;
+    audio_queue._cv.notify_all();
+}
+void fplayer::set_mute(){
+    unique_lock<mutex> lock(audio_queue._lock);
+    in_mute = true;
+    audio_queue._cv.notify_all();
+}
+void fplayer::set_unmute(){
+    unique_lock<mutex> lock(audio_queue._lock);
+    in_mute = false;
+    audio_queue._cv.notify_all();
 }
 /*========================================================================================*/
 }

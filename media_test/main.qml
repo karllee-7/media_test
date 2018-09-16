@@ -21,9 +21,17 @@ Window {
         height: parent.height * 0.1
         width: height
     }
+    Button {
+        id: ctrl_mute
+        text: "\u25AE"
+        anchors.left: ctrl_paly.right
+        anchors.bottom: parent.bottom
+        height: parent.height * 0.1
+        width: height
+    }
     Slider {
         id: ctrl_process
-        anchors.left: ctrl_paly.right
+        anchors.left: ctrl_mute.right
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: parent.height * 0.1
@@ -44,6 +52,18 @@ Window {
             }else{
                 mply.command(MediaPlayer.V_RESUME)
                 ctrl_paly.text = "\u25AE"
+            }
+        }
+    }
+    Connections {
+        target: ctrl_mute
+        onClicked:{
+            if(ctrl_mute.text == "\u25AE"){
+                mply.command(MediaPlayer.V_MUTE)
+                ctrl_mute.text = "\u25B6"
+            }else{
+                mply.command(MediaPlayer.V_UNMUTE)
+                ctrl_mute.text = "\u25AE"
             }
         }
     }

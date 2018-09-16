@@ -57,6 +57,8 @@ class fplayer{
     karl_queue<AVPacket*> video_queue;
     karl_queue<AVPacket*> audio_queue;
     karl_protected<double> timestamp;
+    bool in_pause; // use same mutex with audio_queue
+    bool in_mute;  // use same mutex with audio_queue
 public:
     fplayer();
     ~fplayer();
@@ -81,7 +83,11 @@ public:
                     fplayerVideoCallBack p_videoCallBack,
                     fplayerAudioCallBack p_audioCallBack,
 		    fplayerExitCallBack exitCallBack);
-    snd_pcm_t *pcm_open(unsigned int channels, unsigned int rate, unsigned int period_size);
+    snd_pcm_t *pcm_open(AVCodecContext *audio_codec_ctx);
+    void set_pause();
+    void set_resume();
+    void set_mute();
+    void set_unmute();
 };
 
 }

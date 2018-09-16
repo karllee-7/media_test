@@ -19,10 +19,10 @@ class mediaPlayer : public QObject{
     Q_ENUMS(CMD_KEY)
 public:
     enum CMD_KEY{
-        V_START,
         V_PAUSE,
         V_RESUME,
-        V_STOP
+        V_MUTE,
+        V_UNMUTE
     };
     mediaPlayer(QObject *parent = nullptr);
     ~mediaPlayer();
