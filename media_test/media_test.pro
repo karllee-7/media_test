@@ -19,7 +19,7 @@ SOURCES += \
 
 RESOURCES += qml.qrc
 
-DEFINES += __arm__
+#DEFINES += __arm__
 
 if(contains(DEFINES,__arm__)){
 message("compile for arm")

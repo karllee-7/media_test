@@ -39,26 +39,20 @@ using std::endl;
 /*===================================================================================*/
 typedef std::function<void(uint8_t*, int, int)> fplayerVideoCallBack;
 typedef std::function<void(uint8_t*, int, int)> fplayerAudioCallBack;
-typedef std::function<void()> fplayerExitCallBack;
+typedef std::function<void(int)> fplayerExitCallBack;
 /*===================================================================================*/
 class fplayer{
-    //AVFormatContext *format_ctx;
-    //AVCodecContext *video_codec_ctx;
-    //AVCodecContext *audio_codec_ctx;
-    //fplayerVideoCallBack videoCallBack;
-    //fplayerAudioCallBack audioCallBack;
-    //thread th_packet;
-    //thread th_video;
-    //thread th_audio;
     thread th_core;
     atomic<bool> packet_keep_run;
     atomic<bool> video_keep_run;
     atomic<bool> audio_keep_run;
+    atomic<int>  stop_status;
     karl_queue<AVPacket*> video_queue;
     karl_queue<AVPacket*> audio_queue;
     karl_protected<double> timestamp;
     bool in_pause; // use same mutex with audio_queue
     bool in_mute;  // use same mutex with audio_queue
+    static atomic<bool> selflock;
 public:
     fplayer();
     ~fplayer();
@@ -88,6 +82,7 @@ public:
     void set_resume();
     void set_mute();
     void set_unmute();
+    void set_stop();
 };
 
 }

@@ -11,11 +11,13 @@ fplayer::fplayer():video_queue(30), audio_queue(30){
 }
 //----------------------------------------------------------------------------
 fplayer::~fplayer(){
+    stop_status = 1;
     packet_keep_run = false;
     video_keep_run = false;
     audio_keep_run = false;
     if(th_core.joinable())
         th_core.join();
+    selflock = false;
 }
 //----------------------------------------------------------------------------
 void fplayer::take_packet(AVFormatContext *format_ctx, int videoindex, int audioindex){
@@ -29,7 +31,7 @@ void fplayer::take_packet(AVFormatContext *format_ctx, int videoindex, int audio
         if(frame_pkt->stream_index == videoindex){
             unique_lock<mutex> lock(video_queue._lock);
             while(video_queue.is_full() && packet_keep_run)
-                video_queue._cv.wait_for(lock, milliseconds(500));
+                video_queue._cv.wait_for(lock, milliseconds(100));
             if(packet_keep_run){
                 video_queue._queue.push(frame_pkt);
                 video_queue._cv.notify_all();
@@ -37,7 +39,7 @@ void fplayer::take_packet(AVFormatContext *format_ctx, int videoindex, int audio
         }else if(frame_pkt->stream_index == audioindex){
             unique_lock<mutex> lock(audio_queue._lock);
             while(audio_queue.is_full() && packet_keep_run)
-                audio_queue._cv.wait_for(lock, milliseconds(500));
+                audio_queue._cv.wait_for(lock, milliseconds(100));
             if(packet_keep_run){
                 audio_queue._queue.push(frame_pkt);
                 audio_queue._cv.notify_all();
@@ -45,6 +47,7 @@ void fplayer::take_packet(AVFormatContext *format_ctx, int videoindex, int audio
         }
     }
     qDebug() << "thread take_packet exit";
+    packet_keep_run = false;
 }
 //----------------------------------------------------------------------------
 void fplayer::decode_video(AVFormatContext *format_ctx, 
@@ -68,9 +71,9 @@ void fplayer::decode_video(AVFormatContext *format_ctx,
     while(video_keep_run){
         {
             unique_lock<mutex> lock(video_queue._lock);
-            while(video_queue.is_empty() && video_keep_run)
-                video_queue._cv.wait_for(lock, milliseconds(500));
-            if(video_keep_run){
+            while(video_queue.is_empty() && packet_keep_run && video_keep_run)
+                video_queue._cv.wait_for(lock, milliseconds(100));
+            if(packet_keep_run && video_keep_run){
                 frame_pkt = video_queue._queue.front();
                 video_queue._queue.pop();
                 video_queue._cv.notify_all();
@@ -89,11 +92,11 @@ void fplayer::decode_video(AVFormatContext *format_ctx,
                         pframeRGB->data, pframeRGB->linesize);
             {
                 unique_lock<mutex> lock(timestamp._lock);
-                if(frame_pkt->pts * timeBase > timestamp._data)
-                    timestamp._cv.wait(lock, [&]{return frame_pkt->pts * timeBase <= timestamp._data;});
-                qDebug() << "vdecode " << frame_pkt->pts * timeBase << ", " << timestamp._data;
+                while(frame_pkt->pts * timeBase > timestamp._data && packet_keep_run && video_keep_run)
+                    timestamp._cv.wait_for(lock, milliseconds(100));
+                //qDebug() << "vdecode " << frame_pkt->pts * timeBase << ", " << timestamp._data;
             }
-            if(videoCallBack)
+            if(videoCallBack && video_keep_run)
                 videoCallBack(img_rgb, width, height);
             else
                 free((void *)img_rgb);
@@ -105,6 +108,7 @@ void fplayer::decode_video(AVFormatContext *format_ctx,
     av_frame_free(&pframeRGB);
     sws_freeContext(pImgCvtCtx);
     qDebug() << "thread decode_video exit";
+    video_keep_run = false;
 }
 //----------------------------------------------------------------------------
 void fplayer::decode_audio(AVFormatContext *format_ctx, 
@@ -116,6 +120,7 @@ void fplayer::decode_audio(AVFormatContext *format_ctx,
     bool mute_flg;
     snd_pcm_t *handle = NULL;
     if(audioCallBack == NULL){
+        qDebug() << "snd_pcm_open.";
         handle = pcm_open(audio_codec_ctx);
         if(handle == NULL){
             qDebug() << "open pcm error";
@@ -130,9 +135,9 @@ void fplayer::decode_audio(AVFormatContext *format_ctx,
     while(audio_keep_run){
         {
             unique_lock<mutex> lock(audio_queue._lock);
-            while((audio_queue.is_empty() || in_pause) && audio_keep_run)
-                audio_queue._cv.wait_for(lock, milliseconds(500));
-            if(audio_keep_run){
+            while((audio_queue.is_empty() || in_pause) && packet_keep_run && audio_keep_run)
+                audio_queue._cv.wait_for(lock, milliseconds(100));
+            if(packet_keep_run && audio_keep_run){
                 mute_flg = in_mute;
                 frame_pkt = audio_queue._queue.front();
                 audio_queue._queue.pop();
@@ -159,7 +164,7 @@ void fplayer::decode_audio(AVFormatContext *format_ctx,
             {
                 unique_lock<mutex> lock(timestamp._lock);
                 timestamp._data = frame_pkt->pts * timeBase;
-                qDebug() << "audio decode timestamp " << timestamp._data;
+                //qDebug() << "audio decode timestamp " << timestamp._data;
                 timestamp._cv.notify_all();
             }
             if(audioCallBack)
@@ -182,10 +187,12 @@ void fplayer::decode_audio(AVFormatContext *format_ctx,
     }
     av_frame_free(&framePCM);
     if(audioCallBack == NULL){
+        qDebug() << "snd_pcm_close.";
         snd_pcm_drain(handle);
         snd_pcm_close(handle);
     }
     qDebug() << "thread decode_audio exit.";
+    audio_keep_run = false;
 };
 //----------------------------------------------------------------------------
 int fplayer::core(string filename,
@@ -305,15 +312,19 @@ int fplayer::core(string filename,
     packet_keep_run = true;
     video_keep_run = true;
     audio_keep_run = true;
+    stop_status = 0;
+    in_pause = false;
+    in_mute = false;
     timestamp._data = 0;
     //----------------------------------------------------------------------------
-    thread th_packet= thread(bind(&fplayer::take_packet, this, format_ctx, videoindex, audioindex));
-    thread th_video = thread(bind(&fplayer::decode_video, this, format_ctx, 
-                            video_codec_ctx, videoindex, width, height,
-                            videoCallBack));
-    thread th_audio = thread(bind(&fplayer::decode_audio, this, format_ctx, 
-                            audio_codec_ctx, audioindex,
-                            audioCallBack));
+    auto func_take_packet = bind(&fplayer::take_packet, this, _1, _2, _3);
+    auto func_decode_video = bind(&fplayer::decode_video, this, _1, _2, _3, _4, _5, _6);
+    auto func_decode_audio = bind(&fplayer::decode_audio, this, _1, _2, _3, _4);
+    thread th_packet= thread(func_take_packet, format_ctx, videoindex, audioindex);
+    thread th_video = thread(func_decode_video, format_ctx, video_codec_ctx, videoindex,
+                             width, height, videoCallBack);
+    thread th_audio = thread(func_decode_audio, format_ctx, audio_codec_ctx,
+                             audioindex, audioCallBack);
     //----------------------------------------------------------------------------
     if(th_video.joinable())
         th_video.join();
@@ -323,7 +334,7 @@ int fplayer::core(string filename,
         th_packet.join();
     cleanUp();
     if(exitCallBack)
-        exitCallBack();
+        exitCallBack(stop_status);
     qDebug() << "thread fplayer core exit.";
     return 0;
 }
@@ -332,6 +343,11 @@ int fplayer::play(string filename,
                 fplayerVideoCallBack videoCallBack,
                 fplayerAudioCallBack audioCallBack,
                 fplayerExitCallBack exitCallBack){
+    if(selflock){
+        qDebug() << "error! do not Reopen fplayer.";
+        return -1;
+    }
+    selflock = true;
     if(th_core.joinable()){
         qDebug() << "warning! fplayer core is busy.";
         return -1;
@@ -346,6 +362,7 @@ int fplayer::play(string filename,
 }
 //----------------------------------------------------------------------------
 snd_pcm_t *fplayer::pcm_open(AVCodecContext *audio_codec_ctx){
+    qDebug() << "pcm_open inside.";
     int ret;
     snd_pcm_t *handle;
     ret = snd_pcm_open(&handle, "default", SND_PCM_STREAM_PLAYBACK, 0);
@@ -353,17 +370,11 @@ snd_pcm_t *fplayer::pcm_open(AVCodecContext *audio_codec_ctx){
         qDebug() << "unable to open pcm device " << snd_strerror(ret);
         return NULL;
     }
-#ifdef __arm__
-    int rate = audio_codec_ctx->sample_rate;
-#endif
-#ifdef __amd64__
-    int rate = 48000;
-#endif
     ret = snd_pcm_set_params(handle,
                              SND_PCM_FORMAT_S16_LE,
                              SND_PCM_ACCESS_RW_INTERLEAVED,
                              audio_codec_ctx->channels,
-                             rate,
+                             audio_codec_ctx->sample_rate,
                              1,
                              500000);
     if(ret < 0){
@@ -371,6 +382,7 @@ snd_pcm_t *fplayer::pcm_open(AVCodecContext *audio_codec_ctx){
         snd_pcm_close(handle);
         return NULL;
     }
+    qDebug() << "pcm_open outside.";
     return handle;
 }
 void fplayer::set_pause(){
@@ -393,6 +405,15 @@ void fplayer::set_unmute(){
     in_mute = false;
     audio_queue._cv.notify_all();
 }
+void fplayer::set_stop(){
+    stop_status = 2;
+    packet_keep_run = false;
+    video_keep_run = false;
+    audio_keep_run = false;
+    if(th_core.joinable())
+        th_core.join();
+}
+atomic<bool> fplayer::selflock(false);
 /*========================================================================================*/
 }
 

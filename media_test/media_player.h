@@ -22,7 +22,8 @@ public:
         V_PAUSE,
         V_RESUME,
         V_MUTE,
-        V_UNMUTE
+        V_UNMUTE,
+        V_STOP
     };
     mediaPlayer(QObject *parent = nullptr);
     ~mediaPlayer();
@@ -38,7 +39,7 @@ private:
     karl::fplayer *player;
     void video_callback(uint8_t *data, int width, int height);
     void audio_callback(uint8_t *data, int length, int channel);
-    void exit_callback();
+    void exit_callback(int flag);
 };
 /*===================================================================================*/
 

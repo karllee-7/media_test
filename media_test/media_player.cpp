@@ -28,13 +28,14 @@ void mediaPlayer::video_callback(uint8_t *data, int width, int height){
         emit refreshScrean(img);
 	}
 }
-void mediaPlayer::exit_callback(){
-    qDebug() << "fplayer exit.";
+void mediaPlayer::exit_callback(int flag){
+    emit videoExit(flag);
+    qDebug() << "fplayer exit_callback.";
 }
 int mediaPlayer::open(const QString a, int width, int height){
     int re;
     karl::fplayerVideoCallBack f0 = std::bind(&mediaPlayer::video_callback, this, _1, _2, _3);
-    karl::fplayerExitCallBack f2 = std::bind(&mediaPlayer::exit_callback, this);
+    karl::fplayerExitCallBack f2 = std::bind(&mediaPlayer::exit_callback, this, _1);
     re = player->play(a.toStdString(), width, height, f0, NULL, f2);
     if(re){
         qDebug() << "player open error";
@@ -55,6 +56,9 @@ int mediaPlayer::command(CMD_KEY key){
         break;
     case V_UNMUTE:
         player->set_unmute();
+        break;
+    case V_STOP:
+        player->set_stop();
         break;
     }
     return 0;
